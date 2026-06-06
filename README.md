@@ -1,10 +1,12 @@
-# Quickstart PyTorch with Timing Logs and Multiple Executions
+# Quickstart PyTorch with Instrumented Timing Logs and Multiple Executions
 
-This project runs a Flower/PyTorch simulation with logs for each execution and compiled summaries.
+This project runs an instrumented Flower/PyTorch simulation that records timing information for the main stages of the federated learning workflow. It is useful for anyone who wants to analyze how much time is spent in each part of a Flower execution, such as client selection, model transmission, local training, client response, and server aggregation.
+
+The project also supports multiple executions and automatically generates compiled summaries with average times and confidence intervals.
 
 ## Main Configuration
 
-In `pyproject.toml`, the values now use absolute quantities, without fractions for client selection:
+In `pyproject.toml`, the configuration uses absolute quantities instead of fractions for client selection:
 
 ```toml
 [tool.flwr.app.config]
@@ -20,15 +22,22 @@ batch-size = 32
 log-dir = "logs"
 ```
 
-* `num-supernodes`: number of simulated SuperNodes.
+* `num-server-rounds`: number of federated learning rounds.
+* `num-executions`: number of independent executions of the simulation.
+* `warmup-rounds`: number of initial rounds used as warmup.
+* `num-supernodes`: number of simulated SuperNodes/clients.
 * `num-selected-clients`: fixed number of clients selected in each training round.
 * `num-evaluate-clients`: fixed number of clients used in federated evaluation.
+* `local-epochs`: number of local training epochs per client.
+* `learning-rate`: learning rate used during training.
+* `batch-size`: batch size used by the clients.
+* `log-dir`: directory where the timing logs are stored.
 
-Flower still receives fractions internally in the `FedAvg` strategy, but they are automatically calculated from these values. This keeps the configuration file based on absolute numbers.
+Flower still receives fractions internally in the `FedAvg` strategy, but these fractions are automatically calculated from the absolute values defined in the configuration. This makes the configuration easier to read and adjust.
 
 ## Important Note About SuperNodes
 
-In current Flower versions, the number of SuperNodes used in the local simulation must also exist in the local federation configuration. To apply the value from `pyproject.toml`, run:
+In current Flower versions, the number of SuperNodes used in the local simulation must also be defined in the local federation configuration. To apply the value from `pyproject.toml`, run:
 
 ```powershell
 python -m flwr federation simulation-config --num-supernodes 10 local
@@ -40,43 +49,26 @@ Then execute:
 python -m flwr run . local --stream
 ```
 
-The script `run_fixed.ps1` was also included. It reads `num-supernodes` from `pyproject.toml`, configures the local simulation, and runs Flower.
+The script `run_fixed.ps1` is also included. It reads `num-supernodes` from `pyproject.toml`, configures the local simulation, and runs Flower.
 
 ## Generated Logs
+
+After running the simulation, the project generates one timing log for each execution and a compiled summary file:
 
 ```text
 logs/fl_timing_exec_001.csv
 logs/fl_timing_exec_002.csv
 logs/fl_timing_exec_003.csv
 logs/compiled_with_warmup.csv
-logs/compiled_without_warmup.csv
 ```
 
-The compiled files include stage averages and `tempo_total_medio`.
+Each `fl_timing_exec_XXX.csv` file contains the timing events recorded during one execution.
 
-## Technical Information About Clients and Evaluation
+The `compiled_with_warmup.csv` file contains the compiled timing summary across all executions.
 
-The parameters `num-selected-clients` and `num-evaluate-clients` represent different Flower phases.
+If an old `compiled_without_warmup.csv` file exists from a previous run, the code tries to remove it, since the current version only generates `compiled_with_warmup.csv`.
 
-```toml
-num-supernodes = 10
-num-selected-clients = 10
-num-evaluate-clients = 0
-```
-
-* `num-supernodes`: total number of clients available in the simulation. For example, `10` means that the simulation will have 10 available SuperNodes/clients.
-* `num-selected-clients`: fixed number of clients used in federated training in each round. With `10`, the server selects 10 clients, sends the model to these 10 clients, they train locally, return the weights to the cloud, and the cloud aggregates the 10 results.
-* `num-evaluate-clients`: number of clients used in federated evaluation. This stage is different from training: the server sends the model to clients so they can evaluate it using local validation/test data, and the clients return metrics such as loss and accuracy.
-
-For validating the training cycle times, the recommended configuration is:
-
-```toml
-num-supernodes = 10
-num-selected-clients = 10
-num-evaluate-clients = 0
-```
-
-This configuration keeps 10 clients available and fixes the selection of 10 clients per training round. Federated evaluation remains disabled, avoiding the inclusion of evaluation time in the main times that will be compared with the SPN model.
+## Instrumented Flower Stages
 
 The main stages recorded in the logs are:
 
@@ -89,80 +81,127 @@ envio_cloud_por_cliente
 agregacao_de_todos_clientes
 ```
 
-The `envia_para_clientes` stage includes model transmission, client execution, and the return of client responses to the server. Therefore, to avoid double counting, the average total time calculation in the compiled files uses the server-side stages as the main reference.
+These stages allow users to inspect the main timing components of a Flower/PyTorch federated learning round.
 
-## Correction About `num-evaluate-clients = 0`
+* `inicializa_modelo`: time spent initializing the model.
+* `seleciona_clientes`: time spent selecting clients for the current round.
+* `envia_para_clientes`: time covering model transmission, client execution, and the return of client responses to the server.
+* `treinamento_por_cliente`: local training time measured at the client side.
+* `envio_cloud_por_cliente`: time related to sending the client update back to the cloud/server.
+* `agregacao_de_todos_clientes`: time spent aggregating all selected client updates at the server.
 
-The configuration `num-evaluate-clients = 0` is valid in this project and means that client-side federated evaluation will be disabled. This is useful when the goal is to measure only the main training cycle: client selection, model transmission, local training, return of weights, and server aggregation.
+The stage names are kept in Portuguese because they are directly used in the generated CSV files.
 
-The code allows `num-evaluate-clients = 0` and internally calculates `fraction_evaluate = 0.0`. Thus, the 10 clients remain fixed for training, while the additional client evaluation stage is not included in the timing measurements.
+## Technical Information About Clients and Evaluation
 
-## Correction of the Total Time Calculation
+The parameters `num-selected-clients` and `num-evaluate-clients` represent different phases of Flower.
 
-The compiled files now calculate the average total time in two ways:
+```toml
+num-supernodes = 10
+num-selected-clients = 10
+num-evaluate-clients = 0
+```
 
-* `tempo_total_medio_por_execucao_com_warmup` / `tempo_total_medio_por_execucao_sem_warmup`: average across executions of the sum of the considered rounds.
-* `tempo_total_medio_por_rodada_com_warmup` / `tempo_total_medio_por_rodada_sem_warmup`: average duration of the considered rounds.
+* `num-supernodes`: total number of clients available in the simulation. For example, `10` means that the simulation will have 10 available SuperNodes/clients.
+* `num-selected-clients`: fixed number of clients used in federated training in each round. With `10`, the server selects 10 clients, sends the model to them, the clients train locally, return their updates, and the server aggregates the results.
+* `num-evaluate-clients`: number of clients used in federated evaluation. This stage is different from training. The server sends the model to clients so they can evaluate it using local validation/test data, and the clients return metrics such as loss and accuracy.
 
-The total per round is calculated as:
+For measuring only the main training cycle, the recommended configuration is:
+
+```toml
+num-supernodes = 10
+num-selected-clients = 10
+num-evaluate-clients = 0
+```
+
+This keeps 10 clients available, fixes the selection of 10 clients per training round, and disables federated client-side evaluation. This avoids mixing evaluation time with the main training timing measurements.
+
+## About `num-evaluate-clients = 0`
+
+The configuration `num-evaluate-clients = 0` is valid in this project. It means that client-side federated evaluation is disabled.
+
+This is useful when the goal is to measure only the main training cycle:
+
+```text
+client selection
+model transmission
+local training
+client update return
+server aggregation
+```
+
+Internally, the code allows `num-evaluate-clients = 0` and calculates `fraction_evaluate = 0.0`. Therefore, the selected clients remain fixed for training, while the additional evaluation stage is not included in the timing measurements.
+
+## Total Time Calculation
+
+The compiled summary includes total timing metrics based on the server-side stages. The total time per round is calculated as:
 
 ```text
 seleciona_clientes + envia_para_clientes + agregacao_de_todos_clientes
 ```
 
-The `treinamento_por_cliente` stage appears in the summary as an average per client, but it is not directly summed into the total time because clients execute in parallel and this time is already embedded in `envia_para_clientes`.
+The `treinamento_por_cliente` stage appears in the summary as an average per client, but it is not directly summed into the total time. This is because clients can execute in parallel or in overlapping waves, and their execution time is already embedded in `envia_para_clientes`.
 
-Some Flower versions do not directly expose the internal point used to record `envia_para_clientes`. When this happens, the code automatically inserts an estimated `envia_para_clientes` line into the log of each execution, calculated from server-side timestamps:
+Summing the training time of all clients directly would count the execution as if all clients trained sequentially, which does not represent how Flower simulations usually execute.
+
+## Estimated `envia_para_clientes`
+
+Some Flower versions do not directly expose the internal point used to record `envia_para_clientes`. When this happens, the code automatically inserts an estimated `envia_para_clientes` line into each execution log.
+
+The estimate is calculated from server-side timestamps:
 
 ```text
 envia_para_clientes ~= aggregation start - client selection end
 ```
 
-This prevents the compiled files from showing an artificially low total time when the `envia_para_clientes` stage does not appear directly in the log.
+This avoids generating an artificially low total time when the `envia_para_clientes` stage does not appear directly in the log.
 
-## Note About Total Time and Clients
+## Compiled Summary Behavior
 
-The `compiled_without_warmup.csv` file presents two main totals:
-
-* `tempo_total_medio_por_rodada_sem_warmup`: average time of one training round after removing the warmup rounds.
-* `tempo_total_medio_por_execucao_sem_warmup`: average total time of one execution after removing the warmup rounds. For example, if `num-server-rounds = 5` and `warmup-rounds = 1`, this total considers 4 rounds per execution.
-
-The total time per round is calculated as:
-
-```text
-seleciona_clientes + envia_para_clientes + agregacao_de_todos_clientes
-```
-
-The `envia_para_clientes` stage already includes model transmission, client training, response return, and Flower/Ray overheads. Therefore, the `treinamento_por_cliente` times are not directly summed into the total time, because clients execute in parallel or in waves of parallelism. Summing the training time of all clients would count the time as if they trained sequentially.
-
-The project writes events to individual temporary files inside `logs/_events/` to avoid line loss or corruption when multiple clients write at the same time. At the end, these events are consolidated into `fl_timing_exec_001.csv`, `fl_timing_exec_002.csv`, and so on.
-
-## Updated Compiled Summary Behavior
-
-The project now generates only one compiled summary file:
+The project generates only one compiled summary file:
 
 ```text
 logs/compiled_with_warmup.csv
 ```
 
-The previous `compiled_without_warmup.csv` file is no longer generated. If an old file exists from a previous run, the code tries to remove it.
-
-The row `tempo_total_medio_por_execucao_com_warmup` includes the 95% confidence interval computed across the N executions configured in `num-executions`:
+The row `tempo_total_medio_por_execucao_com_warmup` includes the 95% confidence interval computed across the number of executions configured in `num-executions`:
 
 ```text
 ci95_low_sec
 ci95_high_sec
 ```
 
-The confidence interval is calculated using Student's t-distribution over the total time of each execution. The total time per execution is computed from the server-side stages:
+The confidence interval is calculated using Student's t-distribution over the total time of each execution.
+
+The total time per execution is computed from the server-side stages:
 
 ```text
 seleciona_clientes + envia_para_clientes + agregacao_de_todos_clientes
 ```
 
-The client-side stages are kept as stage-level averages, but they are not summed into the total because client execution is parallel/overlapped and already included in `envia_para_clientes`.
+Client-side stages are kept as stage-level averages, but they are not directly summed into the total because client execution is parallel or overlapped and already included in `envia_para_clientes`.
 
-# DELETE LOGS
+## Temporary Event Files
+
+The project writes timing events to individual temporary files inside:
+
+```text
+logs/_events/
+```
+
+This avoids line loss or file corruption when multiple clients write timing events at the same time.
+
+At the end of each execution, these temporary events are consolidated into files such as:
+
+```text
+logs/fl_timing_exec_001.csv
+logs/fl_timing_exec_002.csv
+logs/fl_timing_exec_003.csv
+```
+
+## Cleaning Logs and Processes on Windows
+
+To stop running processes and remove previous logs, use:
 
 ```powershell
 taskkill /F /IM python.exe
@@ -172,3 +211,7 @@ taskkill /F /IM flower-superlink.exe
 
 Remove-Item -Recurse -Force logs
 ```
+
+## Notes
+
+This version is intended to provide a practical instrumented Flower/PyTorch workflow. It can be used to analyze execution time, compare configurations, inspect training behavior, and collect timing data from different stages of a federated learning simulation.
